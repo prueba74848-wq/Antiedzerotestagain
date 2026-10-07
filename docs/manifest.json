@@ -1,0 +1,9 @@
+{
+  "name": "Antied Zero (test)",
+  "originalName": "Antied Zero",
+  "description": "[1.0.1-test] Test build with ActionSheet patch disabled.",
+  "main": "index.js",
+  "authors": [{"name": "Angelw0lf", "id": "692632336961110087"}],
+  "vendetta": {"icon": "ic_edit_24px"},
+  "hash": "REPLACE_WITH_SHA256_OF_INDEX_JS"
+}
