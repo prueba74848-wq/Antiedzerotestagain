@@ -1,9 +1,8 @@
 {
-  "name": "Antied Zero (test)",
-  "originalName": "Antied Zero",
-  "description": "[1.0.1-test] Test build with ActionSheet patch disabled.",
+  "name": "NoDelete Plus",
+  "description": "Keeps deleted messages (including bulk deletes) and shows edit history.",
   "main": "index.js",
-  "authors": [{"name": "Angelw0lf", "id": "692632336961110087"}],
-  "vendetta": {"icon": "ic_edit_24px"},
-  "hash": "d4c621aeb7bfc7c39da161744d75e88e4dcf5017c919ca4275cff3d91f6ed7c2"
+  "authors": [{ "name": "Your name" }],
+  "vendetta": { "icon": "ic_edit_24px" },
+  "hash": "e9b25b381f0387e170945b0832f7e4380fcbe1749c343a6ca4787084f5bdd769"
 }

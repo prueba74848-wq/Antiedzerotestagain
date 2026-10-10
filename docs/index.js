@@ -1,36 +1,199 @@
-(function(l,y,u,h,n,A,k,M,v,_){"use strict";
-// ===== TEST FLAGS =====
-// true = this patch is DISABLED (not applied). Change one at a time to find the crash.
-const TEST_DISABLE={flux:false,actionsheet:false,selfedit:false,flux_delete:false,flux_edit:false};
-const CACHE_CAP=100;
-function evictIfFull(r){
-  // Proper LRU-style eviction: fires on every insert, not just when a
-  // stage-2 entry happens to get touched again. Map preserves insertion
-  // order, so the first key is always the oldest entry.
-  while(r.size>=CACHE_CAP){
-    const oldestKey=r.keys().next().value;
-    r.delete(oldestKey);
-  }
+(function (exports, patcher, metro, metroCommon, pluginApi) {
+"use strict";
+const { FluxDispatcher, moment } = metroCommon;
+const { storage } = pluginApi;
+const { findByProps, findByStoreName } = metro;
+const patchBefore = patcher.before;
+
+// fills in any setting that has no saved value yet (nested objects are merged, not replaced)
+function makeDefaults(object, defaults) {
+	for (const key of Object.keys(defaults)) {
+		const value = defaults[key];
+		if (value && typeof value === "object" && !Array.isArray(value)) {
+			if (!object[key] || typeof object[key] !== "object") object[key] = {};
+			makeDefaults(object[key], value);
+		} else if (object[key] === undefined) {
+			object[key] = value;
+		}
+	}
 }
-// Global session cap on "resurrected" deletes. Every delete this plugin
-// intercepts gets rewritten into a MESSAGE_UPDATE, which means Discord's
-// own internal message stores (not just this plugin's cache) never run
-// their normal cleanup for that message - it's retained in memory for the
-// rest of the session, for every deletion you're a bystander to, with no
-// limit. In a busy server that grows without bound for as long as the app
-// is open. Past this cap, further deletes are left alone (message just
-// disappears normally) instead of being kept forever.
-const RESURRECT_CAP=300;
-let resurrectedCount=0;
-function U(r){const i=u.findByProps("getChannel","getDMFromUserId"),s=u.findByProps("_channelMessages"),d=u.findByProps("getMessage","getMessages");return!i||!s||!d?(console.error("[ANTIED Zero] flux_dispatch: required stores not found, skipping patch"),function(){}):y.before("dispatch",n.FluxDispatcher,function(c){if(l.isEnabled)try{const e=c[0];if(!e||!e.type)return;if(e.type==="MESSAGE_DELETE"&&!TEST_DISABLE.flux_delete){if(e.otherPluginBypass)return;const t=s.get(e.channelId)?.get(e.id);if(!t?.author?.id||!t.author.username||t?.author?.bot&&t?.flags==64||t.author.bot||!t.content&&!t.attachments?.length&&!t.embeds?.length)return;const a=r.get(e.id);if(a?.stage===2){return}if(a?.stage===1)return a.stage=2,a.message||c;if(resurrectedCount>=RESURRECT_CAP)return;resurrectedCount++;const f=i.getChannel(t.channel_id||e.channelId)?.guild_id;return e.message={...t,content:t.content,channel_id:t.channel_id||e.channelId,guild_id:f,message_reference:t?.message_reference||t?.messageReference||null,flags:64},e.type="MESSAGE_UPDATE",e.channelId=t.channel_id||e.channelId,e.optimistic=!1,e.sendMessageOptions={},e.isPushNotification=!1,evictIfFull(r),r.set(e.id,{message:c,stage:1}),c}if(e.type==="MESSAGE_UPDATE"&&!TEST_DISABLE.flux_edit){if(e.otherPluginBypass)return;const t=e.message;if(!t||t.author?.bot)return;const a=t.channel_id||e.channelId,f=t.id||e.id,g=d.getMessage(a,f)||s.get(a)?.get(f);if(!g?.author?.id||!g.author.username||!g.content&&!g.attachments?.length&&!g.embeds?.length||!t.content||t.content===g.content)return;let T="`[ EDITED ]`\n\n";return e.message={...t,content:`${g.content} ${T}${t.content}`,guild_id:i.getChannel(a)?.guild_id??t.guild_id,edited_timestamp:"invalid_timestamp",message_reference:t?.message_reference||g?.messageReference||null},c}}catch(e){h.showToast("[ANTIED Zero] FluxDispatcher crash \u2013 check logs"),console.error(`[ANTIED Zero] Flux patch
-`,e)}})}function x(){const r=u.findByProps("sendMessage","startEditMessage");return r?y.before("startEditMessage",r,function(i){try{if(!l.isEnabled)return;const[,,s]=i;if(typeof s!="string")return;const d=D("`[ EDITED ]`\n\n"),c=new RegExp(d,"gmi"),e=s.split(c);i[2]=e[e.length-1]}catch(s){console.error(`[ANTIED Zero] self_edit patch
-`,s)}}):(console.error("[ANTIED Zero] self_edit: Message module not found, skipping patch"),function(){})}function N(r){return r?.props?.label?.toLowerCase?.()=="reply"}function $(){const r=u.findByProps("openLazy","hideActionSheet"),i=u.findByProps("getMessage","getMessages"),s=u.findByProps("getChannel","getDMFromUserId"),d=u.findByProps("_channelMessages"),c=u.findByProps("ActionSheetRow");if(!r||!i||!s||!d||!c)return console.error("[ANTIED Zero] actionsheet: required modules not found, skipping patch"),function(){};const{ActionSheetRow:e}=c;let t=null;const a=y.before("openLazy",r,function([f,g,T]){if(l.isEnabled)try{const o=T?.message;if(g!=="MessageLongPressActionSheet"||!o)return;f.then(function(K){try{t?.(),t=y.after("default",K,function(C,S){try{const p=k.findInReactTree(S,function(P){return P?.find?.(N)});if(!p)return S;const J=Math.max(p.findIndex(N),p.length-1);let E=null;if(o?.channel_id&&o?.id&&(E=i.getMessage(o.channel_id,o.id),E||(E=d.get(o.channel_id)?.get(o.id))),!E)return S;const X=D("`[ EDITED ]`\n\n"),L=new RegExp(X,"gmi");if(L.test(o.content)){if(p.some(function(q2){return q2?.props?.label==="Remove Edit History"}))return S;const P=J||1;p.splice(P,0,n.React.createElement(e,{label:"Remove Edit History",subLabel:"Added by Antied Zero",icon:n.React.createElement(e.Icon,{source:A.getAssetIDByName("ic_edit_24px")}),onPress:function(){try{const b=o?.content?.split(L),Y=b[b.length-1];n.FluxDispatcher.dispatch({type:"MESSAGE_UPDATE",message:{...o,message_reference:o?.message_reference||o?.messageReference||null,content:`${Y}`,guild_id:s.getChannel(E.channel_id)?.guild_id},otherPluginBypass:!0}),r.hideActionSheet(),h.showToast("History Removed",A.getAssetIDByName("ic_edit_24px"))}catch(b){h.showToast("[ANTIED Zero] Crash on Remove Edit History press"),console.error(`[ANTIED Zero] Error > ActionSheet:onPress
-`,b)}}}))}}catch(p){h.showToast("[ANTIED Zero] Crash on ActionSheet, check debug log for more info"),console.error(`[ANTIED Zero] Error > ActionSheet:Component Patch
-`,p)}})}catch(C){h.showToast("[ANTIED Zero] Crash resolving ActionSheet component"),console.error(`[ANTIED Zero] Error > ActionSheet:component.then
-`,C)}})}catch(o){h.showToast("[ANTIED Zero] Crash on ActionSheet, check debug log for more info"),console.error(`[ANTIED Zero] Error > ActionSheet Patch
-`,o)}});return function(){a?.(),t?.()}}const{ScrollView:G,View:w,Image:B}=_.General,{FormArrow:z,FormRow:R,FormSection:I,FormDivider:Z}=_.Forms,Q=[{name:"Angel",role:"Author & Maintainer",uuid:"692632336961110087"}],V=[{name:"Moodle",role:"Quality Assurance",uuid:"807170846497570848"},{name:"Rairof",role:"Quality Assurance",uuid:"923212189123346483"},{name:"Catinette",role:"Quality Assurance",uuid:"1302022854740807730"},{name:"Win8.1VMUser",role:"Quality Assurance",uuid:"793935599702507542"}],H=[{label:"Source Code",url:"https://github.com/angelix1/MP"},{label:"Tip via PayPal",url:"https://paypal.me/alixymizuki"},{label:"Buy me a Ko-fi",url:"https://ko-fi.com/angel_wolf"}];function O(){M.useProxy(v.storage);const r=u.findByStoreName("UserStore"),i=function(e){return n.url.openURL(e).catch(function(){})},s=function(e){return r?.getUser(e)||Object.values(r?.getUsers()||{}).find(function(t){return t.id===e})||null},d=function(e){return s(e)?.getAvatarURL?.()?.replace("webp","png")||null},c=function(e){return n.React.createElement(B,{source:{uri:e},style:{width:40,height:40,borderRadius:20}})};return n.React.createElement(n.React.Fragment,null,n.React.createElement(G,null,n.React.createElement(I,{title:"Developers"},Q.map(function(e,t){const a=d(e?.uuid);return n.React.createElement(R,{key:t,label:e.name,subLabel:e.role,leading:a?c(a):null})})),n.React.createElement(I,{title:"Testers"},V.map(function(e,t){const a=d(e?.uuid);return n.React.createElement(R,{key:t,label:e.name,subLabel:e.role,leading:a?c(a):null})})),n.React.createElement(Z,null),n.React.createElement(I,{title:"Support & Source"},n.React.createElement(w,{style:{margin:50}},H.map(function(e,t){let a=e.icon?e.icon?.startsWith("https")?n.React.createElement(B,{source:{uri:e.icon},style:{width:120,height:40}}):n.React.createElement(R.Icon,{source:A.getAssetIDByName(e.icon)}):null;return n.React.createElement(R,{key:t,label:e.label,leading:a,trailing:n.React.createElement(z,null),onPress:function(){return i(e.url)}})}))),n.React.createElement(Z,null),n.React.createElement(w,{style:{height:40}})))}const{FormRow:F}=_.Forms;
-const pageRegistry=new Map([["credits",function(){return n.React.createElement(O)}]]);
-function j(){M.useProxy(v.storage);const r=n.NavigationNative.useNavigation(),i=function(){r.push("VendettaCustomPage",{title:"Credits & Support",render:pageRegistry.get("credits")})};return n.React.createElement(n.React.Fragment,null,n.React.createElement(F,{label:"CREDITS",subLabel:"See the people behind the plugin and ways to support its development.",onPress:i,trailing:n.React.createElement(F.Icon,{source:A.getAssetIDByName("ic_arrow_right")})}))}const D=function(r){return r.replace(/[.*+?^${}()|[\]\\]/g,"\\$&")};l.isEnabled=!1;const q=new Map;let m=[];var W={onLoad:async function(){try{m=[[U,[q],"flux"],[$,[],"actionsheet"],[x,[],"selfedit"]].filter(function(e){return!TEST_DISABLE[e[2]]}).map(function([r,i]){try{return r(...i)}catch(s){return console.error(`[ANTIED Zero] Failed to apply patch
-`,s),null}}).filter(Boolean),console.log("[ANTIED Zero] TEST BUILD - disabled patches:",JSON.stringify(TEST_DISABLE)),l.isEnabled=!0}catch(r){console.error(`[ANTIED Zero] onLoad failed
-`,r)}},onUnload:function(){l.isEnabled=!1;for(const r of m)try{r?.()}catch(i){console.error(`[ANTIED Zero] Failed to unpatch
-`,i)}m=[]},settings:j};return l.default=W,l.regexEscaper=D,Object.defineProperty(l,"__esModule",{value:!0}),l})({},vendetta.patcher,vendetta.metro,vendetta.ui.toasts,vendetta.metro.common,vendetta.ui.assets,vendetta.utils,vendetta.storage,vendetta.plugin,vendetta.ui.components);
+makeDefaults(storage, {
+	ignore: {
+		users: [],
+		channels: [],
+		bots: false,
+	},
+	timestamps: false,
+	ew: false,
+	onlyTimestamps: false,
+});
+
+// ---- options (edit these here; no settings page entry needed) ----
+const SHOW_EDITS = true; // show "old / [ EDITED ] / new" on edited messages
+const EDIT_SEPARATOR = "\n\n`[ EDITED ]`\n\n";
+const MAX_VERSIONS = 10; // versions kept per edited message
+const MAX_TRACKED = 300; // edited messages remembered (oldest are forgotten first)
+
+let MessageStore;
+const patches = [];
+const edits = new Map(); // messageId -> { history: [raw content, oldest -> newest] }
+let alerted = false;
+
+// log every error, but only pop an alert once so a repeating error can't freeze the app
+function reportOnce(where, e) {
+	console.error(`[NoDelete] ${where}`, e);
+	if (alerted) return;
+	alerted = true;
+	alert(`[NoDelete → ${where}] died\n${e?.stack}`);
+}
+
+// false = this message's author is on the ignore list, so let the delete go through normally
+function shouldKeep(channelId, id) {
+	const message = MessageStore.getMessage(channelId, id);
+	if (storage["ignore"]["users"].includes(message?.author?.id)) return false;
+	if (storage["ignore"]["bots"] && message?.author?.bot) return false;
+	return true;
+}
+
+// the fake "automod blocked this" event that makes Discord keep the message and show a note
+function placeholder(channelId, id) {
+	let text = "This message was deleted";
+	if (storage["timestamps"]) text += ` (${moment().format(storage["ew"] ? "hh:mm:ss.SS a" : "HH:mm:ss.SS")})`;
+	return {
+		type: "MESSAGE_EDIT_FAILED_AUTOMOD",
+		messageData: {
+			type: 1,
+			message: { channelId, messageId: id },
+		},
+		errorResponseBody: {
+			code: 200000,
+			message: text,
+		},
+	};
+}
+
+function handleDelete(args, event) {
+	if (!event.id || !event.channelId) return;
+	if (!shouldKeep(event.channelId, event.id)) return;
+	args[0] = placeholder(event.channelId, event.id);
+	return args;
+}
+
+function handleBulkDelete(args, event) {
+	const ids = Array.isArray(event.ids) ? event.ids : [];
+	if (!ids.length || !event.channelId) return;
+
+	const keep = ids.filter((id) => shouldKeep(event.channelId, id));
+	if (!keep.length) return; // everything is ignored: let the bulk delete through untouched
+
+	const keepSet = new Set(keep);
+	const drop = ids.filter((id) => !keepSet.has(id));
+
+	let rest;
+	if (drop.length) {
+		// ignored authors' messages still get deleted, the rest are kept
+		args[0] = { ...event, ids: drop };
+		rest = keep;
+	} else {
+		// this event can only carry one message, so it becomes the first placeholder
+		args[0] = placeholder(event.channelId, keep[0]);
+		rest = keep.slice(1);
+	}
+	// the remaining placeholders are sent right after this dispatch finishes, never inside it
+	if (rest.length) {
+		setTimeout(() => {
+			for (const id of rest) {
+				try {
+					FluxDispatcher.dispatch(placeholder(event.channelId, id));
+				} catch (e) {
+					console.error("[NoDelete] bulk placeholder", e);
+				}
+			}
+		}, 0);
+	}
+	return args;
+}
+
+function handleEdit(args, event) {
+	const msg = event.message;
+	if (!msg || typeof msg.content !== "string") return; // partial update (embeds, flags...): leave alone
+	const channelId = msg.channel_id || event.channelId;
+	const id = msg.id || event.id;
+	if (!channelId || !id) return;
+
+	let rec = edits.get(id);
+	if (!rec) {
+		const current = MessageStore.getMessage(channelId, id);
+		if (!current || typeof current.content !== "string" || !current.content) return;
+		if (storage["ignore"]["users"].includes(current.author?.id)) return;
+		if (storage["ignore"]["bots"] && current.author?.bot) return;
+		if (current.content === msg.content) return; // nothing changed (an embed loaded, etc.)
+		rec = { history: [current.content] };
+		edits.set(id, rec);
+		if (edits.size > MAX_TRACKED) edits.delete(edits.keys().next().value);
+	}
+
+	// compare with the last RAW version, not the combined text the message currently displays
+	if (rec.history[rec.history.length - 1] !== msg.content) {
+		rec.history.push(msg.content);
+		if (rec.history.length > MAX_VERSIONS) rec.history.shift();
+	}
+
+	args[0] = { ...event, message: { ...msg, content: rec.history.join(EDIT_SEPARATOR) } };
+	return args;
+}
+
+const plugin = {
+	onUnload() {
+		for (const unpatch of patches) unpatch();
+		patches.length = 0;
+		edits.clear();
+	},
+	onLoad() {
+		try {
+			patches.push(
+				patchBefore("dispatch", FluxDispatcher, (args) => {
+					try {
+						const event = args[0];
+						const type = event?.type;
+						if (type !== "MESSAGE_DELETE" && type !== "MESSAGE_DELETE_BULK" && type !== "MESSAGE_UPDATE") return;
+						if (type === "MESSAGE_UPDATE" && !SHOW_EDITS) return;
+
+						if (!MessageStore) MessageStore = findByStoreName("MessageStore");
+
+						if (type === "MESSAGE_DELETE") return handleDelete(args, event);
+						if (type === "MESSAGE_DELETE_BULK") return handleBulkDelete(args, event);
+						return handleEdit(args, event);
+					} catch (e) {
+						reportOnce("dispatcher patch", e);
+					}
+				})
+			);
+
+			// when you press Edit on one of your own edited messages, start from the newest text only
+			const messageActions = findByProps("sendMessage", "startEditMessage");
+			if (SHOW_EDITS && messageActions) {
+				patches.push(
+					patchBefore("startEditMessage", messageActions, (args) => {
+						try {
+							if (typeof args[2] === "string" && args[2].includes(EDIT_SEPARATOR)) {
+								args[2] = args[2].split(EDIT_SEPARATOR).pop();
+							}
+							return args;
+						} catch (e) {
+							console.error("[NoDelete] startEditMessage", e);
+						}
+					})
+				);
+			}
+		} catch (e) {
+			console.error(e);
+			alert(`[NoDelete] dead\n${e.stack}`);
+		}
+	},
+};
+
+exports.default = plugin;
+Object.defineProperty(exports, "__esModule", { value: true });
+return exports;
+})({}, vendetta.patcher, vendetta.metro, vendetta.metro.common, vendetta.plugin);
