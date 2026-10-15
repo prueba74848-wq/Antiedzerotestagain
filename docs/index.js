@@ -36,7 +36,7 @@ const MAX_TRACKED = 300; // edited messages remembered (oldest are forgotten fir
 
 let MessageStore;
 const patches = [];
-const edits = new Map(); // messageId -> { history: [raw content, oldest -> newest] }
+const edits = new Map(); // messageId -> { history: [raw content, oldest -> newest], ts: last edited_timestamp }
 let alerted = false;
 
 // log every error, but only pop an alert once so a repeating error can't freeze the app
@@ -115,23 +115,36 @@ function handleBulkDelete(args, event) {
 }
 
 function handleEdit(args, event) {
+	// updates tagged by other plugins (e.g. the translator) are not real edits
+	if (event.otherPluginBypass || event.log_edit === false) return;
+
 	const msg = event.message;
 	if (!msg || typeof msg.content !== "string") return; // partial update (embeds, flags...): leave alone
+
+	// Real edits from Discord carry an edited_timestamp. Local updates don't,
+	// so let those pass through untouched.
+	if (!msg.edited_timestamp) return;
+
 	const channelId = msg.channel_id || event.channelId;
 	const id = msg.id || event.id;
 	if (!channelId || !id) return;
 
 	let rec = edits.get(id);
+
+	// same edit seen again (e.g. a local re-dispatch of an already-edited message)
+	if (rec && rec.ts === msg.edited_timestamp) return;
+
 	if (!rec) {
 		const current = MessageStore.getMessage(channelId, id);
 		if (!current || typeof current.content !== "string" || !current.content) return;
 		if (storage["ignore"]["users"].includes(current.author?.id)) return;
 		if (storage["ignore"]["bots"] && current.author?.bot) return;
 		if (current.content === msg.content) return; // nothing changed (an embed loaded, etc.)
-		rec = { history: [current.content] };
+		rec = { history: [current.content], ts: msg.edited_timestamp };
 		edits.set(id, rec);
 		if (edits.size > MAX_TRACKED) edits.delete(edits.keys().next().value);
 	}
+	rec.ts = msg.edited_timestamp;
 
 	// compare with the last RAW version, not the combined text the message currently displays
 	if (rec.history[rec.history.length - 1] !== msg.content) {
