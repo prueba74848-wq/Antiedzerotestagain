@@ -4,6 +4,7 @@ const { FluxDispatcher, moment } = metroCommon;
 const { storage } = pluginApi;
 const { findByProps, findByStoreName } = metro;
 const patchBefore = patcher.before;
+const patchAfter = patcher.after;
 
 // fills in any setting that has no saved value yet (nested objects are merged, not replaced)
 function makeDefaults(object, defaults) {
@@ -33,10 +34,12 @@ const SHOW_EDITS = true; // show "old / [ EDITED ] / new" on edited messages
 const EDIT_SEPARATOR = "\n\n`[ EDITED ]`\n\n";
 const MAX_VERSIONS = 10; // versions kept per edited message
 const MAX_TRACKED = 300; // edited messages remembered (oldest are forgotten first)
+const EPHEMERAL = 64; // message flag for ephemeral (Clyde / bot "only you can see this") messages
 
 let MessageStore;
 const patches = [];
 const edits = new Map(); // messageId -> { history: [raw content, oldest -> newest], ts: last edited_timestamp }
+const deletedIds = new Set(); // messages NoDelete is holding as "This message was deleted"
 let alerted = false;
 
 // log every error, but only pop an alert once so a repeating error can't freeze the app
@@ -47,9 +50,16 @@ function reportOnce(where, e) {
 	alert(`[NoDelete → ${where}] died\n${e?.stack}`);
 }
 
-// false = this message's author is on the ignore list, so let the delete go through normally
+// true if this is a read-only ephemeral message (Clyde warning, bot "only you can see this"),
+// which Discord lets you Dismiss - we must let that delete go through instead of keeping it
+function isEphemeral(message) {
+	return !!(message && typeof message.flags === "number" && (message.flags & EPHEMERAL) === EPHEMERAL);
+}
+
+// false = let the delete go through normally (ignored author, or a dismissable ephemeral message)
 function shouldKeep(channelId, id) {
 	const message = MessageStore.getMessage(channelId, id);
+	if (isEphemeral(message)) return false; // let Dismiss actually remove Clyde / ephemeral bot messages
 	if (storage["ignore"]["users"].includes(message?.author?.id)) return false;
 	if (storage["ignore"]["bots"] && message?.author?.bot) return false;
 	return true;
@@ -74,7 +84,9 @@ function placeholder(channelId, id) {
 
 function handleDelete(args, event) {
 	if (!event.id || !event.channelId) return;
+	if (event.__noDeleteBypass) return; // our own "Delete Kept Message" action: let it delete
 	if (!shouldKeep(event.channelId, event.id)) return;
+	deletedIds.add(event.id);
 	args[0] = placeholder(event.channelId, event.id);
 	return args;
 }
@@ -97,6 +109,7 @@ function handleBulkDelete(args, event) {
 	} else {
 		// this event can only carry one message, so it becomes the first placeholder
 		args[0] = placeholder(event.channelId, keep[0]);
+		deletedIds.add(keep[0]);
 		rest = keep.slice(1);
 	}
 	// the remaining placeholders are sent right after this dispatch finishes, never inside it
@@ -104,6 +117,7 @@ function handleBulkDelete(args, event) {
 		setTimeout(() => {
 			for (const id of rest) {
 				try {
+					deletedIds.add(id);
 					FluxDispatcher.dispatch(placeholder(event.channelId, id));
 				} catch (e) {
 					console.error("[NoDelete] bulk placeholder", e);
@@ -156,11 +170,60 @@ function handleEdit(args, event) {
 	return args;
 }
 
+// ---------------------------------------------------------------- long-press menu actions
+
+// collapse an edited message back to its newest version and forget the stored history
+function removeEditHistory(channelId, id) {
+	const rec = edits.get(id);
+	edits.delete(id);
+	const current = MessageStore.getMessage(channelId, id);
+	if (!current) return;
+	const newest = rec ? rec.history[rec.history.length - 1] : undefined;
+	const content = typeof newest === "string"
+		? newest
+		: (typeof current.content === "string" ? current.content.split(EDIT_SEPARATOR).pop() : current.content);
+	// otherPluginBypass so handleEdit ignores this update and doesn't re-stitch the history back in
+	FluxDispatcher.dispatch({
+		type: "MESSAGE_UPDATE",
+		message: { ...current, content },
+		otherPluginBypass: true,
+		log_edit: false,
+	});
+}
+
+// actually remove a message NoDelete is holding (or any message you want gone from your view)
+function deleteKeptMessage(channelId, id) {
+	edits.delete(id);
+	deletedIds.delete(id);
+	FluxDispatcher.dispatch({ type: "MESSAGE_DELETE", id, channelId, __noDeleteBypass: true });
+}
+
+// fallback tree walker, only used if vendetta.utils.findInReactTree is missing
+function localFindInReactTree(node, filter, depth = 0) {
+	if (!node || depth > 30) return undefined;
+	try {
+		if (filter(node)) return node;
+	} catch (_) {}
+	if (Array.isArray(node)) {
+		for (const child of node) {
+			const found = localFindInReactTree(child, filter, depth + 1);
+			if (found !== undefined) return found;
+		}
+		return undefined;
+	}
+	if (typeof node === "object") {
+		const kids = node.props?.children ?? node.children;
+		if (kids !== undefined) return localFindInReactTree(kids, filter, depth + 1);
+	}
+	return undefined;
+}
+
 const plugin = {
 	onUnload() {
 		for (const unpatch of patches) unpatch();
 		patches.length = 0;
 		edits.clear();
+		deletedIds.clear();
 	},
 	onLoad() {
 		try {
@@ -198,6 +261,90 @@ const plugin = {
 						}
 					})
 				);
+			}
+
+			// add the two long-press menu rows (same approach as the ViewThread plugin for this client)
+			try {
+				const React = metroCommon.React || findByProps("createElement");
+				const findInReactTree =
+					(vendetta.utils && vendetta.utils.findInReactTree) || localFindInReactTree;
+				const ActionSheet = findByProps("openLazy", "hideActionSheet");
+				const rowMod = findByProps("ActionSheetRow");
+				const ActionSheetRow = rowMod && rowMod.ActionSheetRow;
+				const getAssetIDByName = vendetta.ui && vendetta.ui.assets && vendetta.ui.assets.getAssetIDByName;
+				const asset = (...names) => {
+					if (!getAssetIDByName) return undefined;
+					for (const n of names) {
+						const id = getAssetIDByName(n);
+						if (id) return id;
+					}
+					return undefined;
+				};
+				const TRASH = asset("ic_message_delete", "trash", "ic_trash_24px", "ic_trash");
+				const PENCIL = asset("ic_edit_24px", "ic_edit", "pencil", "ic_pencil");
+
+				if (React && ActionSheet && ActionSheetRow && findInReactTree) {
+					patches.push(
+						patchBefore("openLazy", ActionSheet, ([comp, key, sheetProps]) => {
+							try {
+								if (key !== "MessageLongPressActionSheet" || !(sheetProps && sheetProps.message)) return;
+								const message = sheetProps.message;
+								const channelId = message.channel_id;
+								if (!message.id || !channelId) return;
+								if (!comp || typeof comp.then !== "function") return;
+
+								comp.then((instance) => {
+									const unpatch = patchAfter("default", instance, (_a, component) => {
+										try {
+											// auto-remove this patch after it runs once for this sheet instance
+											React.useEffect(() => () => { unpatch(); }, []);
+
+											const makeButton = (label, icon, action) =>
+												React.createElement(ActionSheetRow, {
+													label,
+													icon: icon ? React.createElement(ActionSheetRow.Icon, { source: icon }) : undefined,
+													onPress: () => {
+														try { ActionSheet.hideActionSheet(); } catch (_) {}
+														try { action(); } catch (e) { console.error("[NoDelete] row action", e); }
+													},
+												});
+
+											const buttons = [];
+											if (edits.has(message.id)) {
+												buttons.push(makeButton("Remove Edit History", PENCIL, () => removeEditHistory(channelId, message.id)));
+											}
+											buttons.push(makeButton("Delete Kept Message", TRASH, () => deleteKeptMessage(channelId, message.id)));
+
+											const groups = findInReactTree(
+												component,
+												(c) => Array.isArray(c) && c[0]?.type?.name === "ActionSheetRowGroup"
+											);
+											if (groups && groups.length) {
+												for (const group of groups) {
+													const rows = findInReactTree(
+														group,
+														(c) => Array.isArray(c) && c.some((ch) => ch?.type?.name === "ActionSheetRow")
+													);
+													if (rows) { rows.unshift(...buttons); return; }
+												}
+												if (ActionSheetRow.Group) {
+													groups.splice(0, 0, React.createElement(ActionSheetRow.Group, null, ...buttons));
+												}
+											}
+										} catch (e) {
+											console.error("[NoDelete] action sheet patch", e);
+										}
+									});
+									patches.push(unpatch);
+								}).catch(() => {});
+							} catch (e) {
+								console.error("[NoDelete] openLazy", e);
+							}
+						})
+					);
+				}
+			} catch (e) {
+				console.error("[NoDelete] context menu setup", e);
 			}
 		} catch (e) {
 			console.error(e);
