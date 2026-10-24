@@ -105,7 +105,8 @@ function installCrashCapture() {
 				if ((fatal || looksNative) && Date.now() - lastCaptured > 10000) {
 					lastCaptured = Date.now();
 					const report = crashReport(err, fatal);
-					storage.pendingReport = report; // copied again on the next launch/reload, then cleared
+					storage.pendingReport = report; // copied again on the next launch/reload
+					storage.lastReport = report; // kept so the debug page can always show it
 					copyText(report);
 					toast("NoDelete: error report copied to clipboard");
 				}
@@ -128,6 +129,7 @@ function removeCrashCapture() {
 function deliverPendingReport() {
 	try {
 		if (!DEBUG || !storage.pendingReport) return;
+		storage.lastReport = storage.pendingReport;
 		const ok = copyText(storage.pendingReport);
 		storage.pendingReport = null;
 		toast(ok ? "NoDelete: last error report copied to clipboard" : "NoDelete: could not copy the error report");
@@ -309,7 +311,38 @@ function localFindInReactTree(node, filter, depth = 0) {
 	return undefined;
 }
 
+// ---------------------------------------------------------------- debug page (plugin settings)
+function DebugSettings() {
+	const React = metroCommon.React;
+	const RN = metroCommon.ReactNative;
+	const [, force] = React.useReducer((x) => x + 1, 0);
+	const arr = (v) => { try { return v ? Array.prototype.slice.call(v) : []; } catch (_) { return []; } };
+	const text = [
+		storage.lastReport ? "LAST ERROR REPORT:\n" + storage.lastReport : "(no error report captured yet)",
+		"",
+		"PREVIOUS SESSION ACTIVITY (oldest -> newest):",
+		...(arr(storage.prevTrail).length ? arr(storage.prevTrail) : ["(none)"]),
+		"",
+		"THIS SESSION ACTIVITY (oldest -> newest):",
+		...(arr(storage.debugTrail).length ? arr(storage.debugTrail) : ["(none)"]),
+	].join("\n");
+	return React.createElement(
+		RN.ScrollView,
+		{ style: { flex: 1 }, contentContainerStyle: { padding: 12 } },
+		React.createElement(RN.Button, {
+			title: "Copy everything",
+			onPress: () => { toast(copyText(text) ? "NoDelete: log copied" : "NoDelete: copy failed"); },
+		}),
+		React.createElement(RN.Button, {
+			title: "Clear log",
+			onPress: () => { trail = []; storage.debugTrail = []; storage.prevTrail = []; storage.lastReport = null; force(); },
+		}),
+		React.createElement(RN.Text, { selectable: true, style: { color: "#ffffff", fontSize: 11, marginTop: 8 } }, text)
+	);
+}
+
 const plugin = {
+	settings: DebugSettings,
 	onUnload() {
 		for (const unpatch of patches) unpatch();
 		patches.length = 0;
@@ -319,6 +352,11 @@ const plugin = {
 	},
 	onLoad() {
 		try {
+			try {
+				// keep the previous session's activity log (the first dbg() below would overwrite it)
+				const old = storage.debugTrail ? Array.prototype.slice.call(storage.debugTrail) : [];
+				if (old.length > 1) storage.prevTrail = old;
+			} catch (_) {}
 			deliverPendingReport(); // hand over the report from a previous crash, if there is one
 			installCrashCapture();
 			dbg("LOADED", `edits=${SHOW_EDITS} (original build + debug only)`);
