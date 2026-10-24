@@ -1,8 +1,14 @@
 {
-  "name": "NoDelete Plus",
-  "description": "Keeps deleted messages (including bulk deletes) and shows edit history. Long-press a message for Remove Edit History / Delete Kept Message; ephemeral (Clyde/bot) messages can be dismissed.",
-  "main": "index.js",
-  "authors": [{ "name": "Your name" }],
-  "vendetta": { "icon": "ic_edit_24px" },
-  "hash": "3281734de207e1298109e7b2c9aad05442810bb814a7332f18f284ec8cba3364"
+	"name": "NoDelete Plus",
+	"description": "DEBUG BUILD (original behaviour + crash capture). Keeps deleted messages (including bulk deletes) and shows edit history. Long-press a message for Remove Edit History / Delete Kept Message; ephemeral (Clyde/bot) messages can be dismissed.",
+	"main": "index.js",
+	"authors": [
+		{
+			"name": "Your name"
+		}
+	],
+	"vendetta": {
+		"icon": "ic_edit_24px"
+	},
+	"hash": "fd3827b6ffb16517b97d48d057ee542d5df26205e70d9c581de0ba90aed514a2"
 }

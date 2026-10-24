@@ -50,6 +50,90 @@ function reportOnce(where, e) {
 	alert(`[NoDelete → ${where}] died\n${e?.stack}`);
 }
 
+// ---------------------------------------------------------------- debug trail + crash capture
+// DEBUG keeps a short log of what the plugin just did (saved to storage as it goes) and, when the app throws a
+// fatal / native error, copies  error + stack + that log  to the clipboard (and again on the next launch).
+const DEBUG = true;
+const TRAIL_MAX = 40;
+let trail = [];
+function preview(s) {
+	return typeof s === "string" ? `${JSON.stringify(s.length > 60 ? s.slice(0, 60) + "…" : s)} (len ${s.length})` : `<${typeof s}>`;
+}
+function dbg(tag, info) {
+	if (!DEBUG) return;
+	try {
+		trail.push(`${new Date().toISOString().slice(11, 23)} ${tag}${info ? " " + info : ""}`);
+		if (trail.length > TRAIL_MAX) trail.shift();
+		storage.debugTrail = trail.slice(); // saved right away so it survives a hard crash
+	} catch (_) {}
+}
+function copyText(text) {
+	try {
+		const clip = metroCommon.clipboard || findByProps("setString", "getString");
+		if (clip && clip.setString) { clip.setString(text); return true; }
+	} catch (_) {}
+	return false;
+}
+function toast(msg) {
+	try { vendetta.ui.toasts.showToast(msg); } catch (_) {}
+}
+function crashReport(err, fatal) {
+	const msg = err && (err.message || String(err));
+	const stack = err && err.stack ? String(err.stack).slice(0, 3000) : "";
+	return [
+		"NoDelete Plus debug report",
+		`fatal=${!!fatal} edits=${SHOW_EDITS} (original build + debug only)`,
+		"ERROR: " + msg,
+		"STACK: " + stack,
+		"TRAIL (oldest -> newest):",
+		...trail,
+	].join("\n");
+}
+let prevHandler = null;
+let ourHandler = null;
+let lastCaptured = 0;
+function installCrashCapture() {
+	if (!DEBUG) return;
+	try {
+		const EU = globalThis.ErrorUtils;
+		if (!EU || !EU.getGlobalHandler || !EU.setGlobalHandler) return;
+		prevHandler = EU.getGlobalHandler();
+		ourHandler = (err, fatal) => {
+			try {
+				const text = String((err && err.message) || err);
+				const looksNative = /native call|deserializ|serializ/i.test(text);
+				if ((fatal || looksNative) && Date.now() - lastCaptured > 10000) {
+					lastCaptured = Date.now();
+					const report = crashReport(err, fatal);
+					storage.pendingReport = report; // copied again on the next launch/reload, then cleared
+					copyText(report);
+					toast("NoDelete: error report copied to clipboard");
+				}
+			} catch (_) {}
+			if (prevHandler) return prevHandler(err, fatal);
+		};
+		EU.setGlobalHandler(ourHandler);
+	} catch (e) {
+		console.error("[NoDelete] crash capture", e);
+	}
+}
+function removeCrashCapture() {
+	try {
+		const EU = globalThis.ErrorUtils;
+		if (EU && ourHandler && EU.getGlobalHandler() === ourHandler && prevHandler) EU.setGlobalHandler(prevHandler);
+	} catch (_) {}
+	ourHandler = null;
+}
+// a report from the previous run that has not been handed over yet
+function deliverPendingReport() {
+	try {
+		if (!DEBUG || !storage.pendingReport) return;
+		const ok = copyText(storage.pendingReport);
+		storage.pendingReport = null;
+		toast(ok ? "NoDelete: last error report copied to clipboard" : "NoDelete: could not copy the error report");
+	} catch (_) {}
+}
+
 // true if this is a read-only ephemeral message (Clyde warning, bot "only you can see this"),
 // which Discord lets you Dismiss - we must let that delete go through instead of keeping it
 function isEphemeral(message) {
@@ -59,10 +143,12 @@ function isEphemeral(message) {
 // false = let the delete go through normally (ignored author, or a dismissable ephemeral message)
 function shouldKeep(channelId, id) {
 	const message = MessageStore.getMessage(channelId, id);
-	if (isEphemeral(message)) return false; // let Dismiss actually remove Clyde / ephemeral bot messages
-	if (storage["ignore"]["users"].includes(message?.author?.id)) return false;
-	if (storage["ignore"]["bots"] && message?.author?.bot) return false;
-	return true;
+	let keep = true;
+	if (isEphemeral(message)) keep = false; // let Dismiss actually remove Clyde / ephemeral bot messages
+	else if (storage["ignore"]["users"].includes(message?.author?.id)) keep = false;
+	else if (storage["ignore"]["bots"] && message?.author?.bot) keep = false;
+	dbg("shouldKeep", `ch=${channelId} id=${id} inStore=${!!message} flags=${message?.flags} type=${message?.type} -> ${keep}`);
+	return keep;
 }
 
 // the fake "automod blocked this" event that makes Discord keep the message and show a note
@@ -96,6 +182,7 @@ function handleBulkDelete(args, event) {
 	if (!ids.length || !event.channelId) return;
 
 	const keep = ids.filter((id) => shouldKeep(event.channelId, id));
+	dbg("BULK delete", `ch=${event.channelId} total=${ids.length} keep=${keep.length}`);
 	if (!keep.length) return; // everything is ignored: let the bulk delete through untouched
 
 	const keepSet = new Set(keep);
@@ -166,7 +253,9 @@ function handleEdit(args, event) {
 		if (rec.history.length > MAX_VERSIONS) rec.history.shift();
 	}
 
-	args[0] = { ...event, message: { ...msg, content: rec.history.join(EDIT_SEPARATOR) } };
+	const combined = rec.history.join(EDIT_SEPARATOR);
+	dbg("EDIT rewrite", `id=${id} versions=${rec.history.length} incoming=${preview(msg.content)} combinedLen=${combined.length} msgType=${msg.type}`);
+	args[0] = { ...event, message: { ...msg, content: combined } };
 	return args;
 }
 
@@ -183,6 +272,7 @@ function removeEditHistory(channelId, id) {
 		? newest
 		: (typeof current.content === "string" ? current.content.split(EDIT_SEPARATOR).pop() : current.content);
 	// otherPluginBypass so handleEdit ignores this update and doesn't re-stitch the history back in
+	dbg("REMOVE-HISTORY dispatch", `id=${id} ch=${channelId} content=${preview(content)} spreadKeys=${Object.keys(current).join(",")}`);
 	FluxDispatcher.dispatch({
 		type: "MESSAGE_UPDATE",
 		message: { ...current, content },
@@ -195,6 +285,7 @@ function removeEditHistory(channelId, id) {
 function deleteKeptMessage(channelId, id) {
 	edits.delete(id);
 	deletedIds.delete(id);
+	dbg("DELETE-KEPT dispatch", `id=${id} ch=${channelId}`);
 	FluxDispatcher.dispatch({ type: "MESSAGE_DELETE", id, channelId, __noDeleteBypass: true });
 }
 
@@ -224,9 +315,13 @@ const plugin = {
 		patches.length = 0;
 		edits.clear();
 		deletedIds.clear();
+		removeCrashCapture();
 	},
 	onLoad() {
 		try {
+			deliverPendingReport(); // hand over the report from a previous crash, if there is one
+			installCrashCapture();
+			dbg("LOADED", `edits=${SHOW_EDITS} (original build + debug only)`);
 			patches.push(
 				patchBefore("dispatch", FluxDispatcher, (args) => {
 					try {
@@ -291,6 +386,7 @@ const plugin = {
 								const message = sheetProps.message;
 								const channelId = message.channel_id;
 								if (!message.id || !channelId) return;
+								dbg("MENU open", `id=${message.id} ch=${channelId} hasHistory=${edits.has(message.id)}`);
 								if (!comp || typeof comp.then !== "function") return;
 
 								comp.then((instance) => {
