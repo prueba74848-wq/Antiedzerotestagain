@@ -34,6 +34,10 @@ const SHOW_EDITS = true; // show "old / [ EDITED ] / new" on edited messages
 const EDIT_SEPARATOR = "\n\n`[ EDITED ]`\n\n";
 const MAX_VERSIONS = 10; // versions kept per edited message
 const MAX_TRACKED = 300; // edited messages remembered (oldest are forgotten first)
+const MAX_COMBINED = 3500; // max characters of combined "old / edited / new" text shown for one message
+// ---- feature switches (set one to false to turn that piece off; use these to find what crashes) ----
+const ENABLE_MENU = true; // the two long-press rows: Remove Edit History / Delete Kept Message
+const ENABLE_DISMISS = true; // let ephemeral (Clyde / bot) messages be dismissed instead of kept
 const EPHEMERAL = 64; // message flag for ephemeral (Clyde / bot "only you can see this") messages
 
 let MessageStore;
@@ -82,7 +86,7 @@ function crashReport(err, fatal) {
 	const stack = err && err.stack ? String(err.stack).slice(0, 3000) : "";
 	return [
 		"NoDelete Plus debug report",
-		`fatal=${!!fatal} edits=${SHOW_EDITS} (original build + debug only)`,
+		`fatal=${!!fatal} menu=${ENABLE_MENU} dismiss=${ENABLE_DISMISS} edits=${SHOW_EDITS}`,
 		"ERROR: " + msg,
 		"STACK: " + stack,
 		"TRAIL (oldest -> newest):",
@@ -139,6 +143,7 @@ function deliverPendingReport() {
 // true if this is a read-only ephemeral message (Clyde warning, bot "only you can see this"),
 // which Discord lets you Dismiss - we must let that delete go through instead of keeping it
 function isEphemeral(message) {
+	if (!ENABLE_DISMISS) return false;
 	return !!(message && typeof message.flags === "number" && (message.flags & EPHEMERAL) === EPHEMERAL);
 }
 
@@ -255,7 +260,11 @@ function handleEdit(args, event) {
 		if (rec.history.length > MAX_VERSIONS) rec.history.shift();
 	}
 
+	// keep the combined text bounded: drop the OLDEST versions first (the newest is always kept)
+	while (rec.history.length > 1 && rec.history.join(EDIT_SEPARATOR).length > MAX_COMBINED) rec.history.shift();
 	const combined = rec.history.join(EDIT_SEPARATOR);
+	if (typeof combined !== "string" || !combined) return; // never send an empty/odd content to the native renderer
+
 	dbg("EDIT rewrite", `id=${id} versions=${rec.history.length} incoming=${preview(msg.content)} combinedLen=${combined.length} msgType=${msg.type}`);
 	args[0] = { ...event, message: { ...msg, content: combined } };
 	return args;
@@ -273,11 +282,15 @@ function removeEditHistory(channelId, id) {
 	const content = typeof newest === "string"
 		? newest
 		: (typeof current.content === "string" ? current.content.split(EDIT_SEPARATOR).pop() : current.content);
-	// otherPluginBypass so handleEdit ignores this update and doesn't re-stitch the history back in
-	dbg("REMOVE-HISTORY dispatch", `id=${id} ch=${channelId} content=${preview(content)} spreadKeys=${Object.keys(current).join(",")}`);
+	// Send a minimal RAW partial update (id, channel_id, content) - the same shape Discord's gateway sends for
+	// embed updates. Never spread the store's Message record into the event: it uses camelCase fields and moment
+	// objects, and storing that makes the native chat renderer fail to deserialize the message row (app crash).
+	// otherPluginBypass so handleEdit ignores this update and doesn't re-stitch the history back in.
+	if (typeof content !== "string") return;
+	dbg("REMOVE-HISTORY dispatch", `id=${id} ch=${channelId} content=${preview(content)}`);
 	FluxDispatcher.dispatch({
 		type: "MESSAGE_UPDATE",
-		message: { ...current, content },
+		message: { id, channel_id: channelId, content },
 		otherPluginBypass: true,
 		log_edit: false,
 	});
@@ -359,7 +372,7 @@ const plugin = {
 			} catch (_) {}
 			deliverPendingReport(); // hand over the report from a previous crash, if there is one
 			installCrashCapture();
-			dbg("LOADED", `edits=${SHOW_EDITS} (original build + debug only)`);
+			dbg("LOADED", `menu=${ENABLE_MENU} dismiss=${ENABLE_DISMISS} edits=${SHOW_EDITS}`);
 			patches.push(
 				patchBefore("dispatch", FluxDispatcher, (args) => {
 					try {
@@ -416,7 +429,7 @@ const plugin = {
 				const TRASH = asset("ic_message_delete", "trash", "ic_trash_24px", "ic_trash");
 				const PENCIL = asset("ic_edit_24px", "ic_edit", "pencil", "ic_pencil");
 
-				if (React && ActionSheet && ActionSheetRow && findInReactTree) {
+				if (ENABLE_MENU && React && ActionSheet && ActionSheetRow && findInReactTree) {
 					patches.push(
 						patchBefore("openLazy", ActionSheet, ([comp, key, sheetProps]) => {
 							try {
